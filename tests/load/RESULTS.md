@@ -44,9 +44,38 @@ ringing forever, which blocked sipp's `-m` exit. Fixed with a one-shot retry on
 ARI transport errors (`backend/app/ari.py::_req`). Re-validated post-fix on the
 production server (below).
 
-## Environment B — iszzylab server (192.168.1.182), docker 29.1.3, 4 cores
+## Environment B — iszzylab server (192.168.1.182), docker 29.1.3, 4 cores, 16 GB
 
-(To be filled after the on-server runs.)
+| Run | Result (sipp) | Asterisk | Backend |
+|-----|---------------|----------|---------|
+| server-ivr-500 (pre-fix) | 1206 ok / 1294 failed | — | — |
+| server-ivr-500 (ulimit fix) | **2500/2500 ok, 0 failed** | avg 115% / peak 143% CPU, 0.18 GiB | avg 50% / peak 64% CPU, 0.06 GiB |
+| server-queue-500 | (below) | | |
+
+The pre-fix failure mode was deterministic: **488 Not Acceptable Here** on new
+INVITEs once ~1.2k calls had passed. Asterisk's logs showed
+`Unable to allocate RTCP socket: Too many open files` — the Docker default FD
+limit (1024) exhausted by ~500 concurrent calls × (RTP + RTCP + signaling)
+sockets. Fix: `ulimits.nofile: 65536` on the asterisk service. Zero failures
+after.
+
+Operational lessons from Environment B:
+
+1. **Rootless port publishing + desktop apps don't mix.** On the dev
+   workstation, OnlyOffice DesktopEditors grabbed UDP 13012 inside our
+   published RTP range and bricked the Asterisk container. Fix: host
+   networking for Asterisk on the server (also the standard VoIP deployment
+   pattern — no NAT in the media path).
+2. **ARI keep-alive drops under burst** (~0.1% of REST calls): retried once in
+   `_req`. During a 500-call teardown storm the drops cluster; without a
+   retry, channels wedge in Stasis forever.
+3. **No queue reconciliation (gap).** If backend call-control tasks die (e.g.
+   during an ARI storm), Redis queue entries outlive them and phantom calls
+   persist. Recovery is manual (flush keys + re-mark rows). Phase 2 should add
+   a reaper: periodically diff `cc:queue:*` against live ARI channels.
+4. sipp timing: with `-l 500` and 60 s holds, effective rate is ~8 calls/s —
+   size `-m` accordingly and don't kill the wrapper mid-run; orphaned SIP
+   channels need mass hangup via ARI.
 
 ## Takeaways
 

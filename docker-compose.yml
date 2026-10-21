@@ -16,6 +16,12 @@ services:
       SIP_EXTERNAL_IP: ${SIP_EXTERNAL_IP:-192.168.1.182}
     volumes:
       - ./asterisk/config:/etc/asterisk:ro
+    ulimits:
+      # 500 concurrent calls hold >1k RTP/RTCP/signaling sockets; the Docker
+      # default (1024) exhausts and Asterisk starts answering 488.
+      nofile:
+        soft: 65536
+        hard: 65536
     healthcheck:
       test: ["CMD-SHELL", "asterisk -rx 'core show version' >/dev/null 2>&1 || exit 1"]
       interval: 10s

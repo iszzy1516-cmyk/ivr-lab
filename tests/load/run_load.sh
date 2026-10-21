@@ -30,15 +30,22 @@ mkdir -p "$OUT"
 echo "[$LABEL] starting: ext=$EXT concurrency<=$CONC rate=${RATE}/s dur=${DUR}ms total=$TOTAL"
 echo "[$LABEL] sampling docker stats to $OUT/$LABEL.stats ..."
 
-# sample container resource usage for the whole run
-(docker stats --no-stream --format \
-  '{{printf "%s" .Name}}|{{.CPUPerc}}|{{.MemUsage}}' asterisk cc-backend cc-postgres cc-redis \
-  > /dev/null 2>&1 || true
+# sample container resource usage for the whole run.
+# Set SSH_TARGET (e.g. iszzy@192.168.1.182) to sample a remote docker host.
+stats_line() {
+  if [ -n "${SSH_TARGET:-}" ]; then
+    # NB: the remote command must be ONE quoted arg — ssh concatenates argv
+    # and quotes would not survive the trip.
+    ssh "$SSH_TARGET" 'docker stats --no-stream --format "{{.Name}} cpu={{.CPUPerc}} mem={{.MemUsage}}" asterisk cc-backend cc-postgres cc-redis' 2>/dev/null
+  else
+    docker stats --no-stream --format \
+      '{{.Name}} cpu={{.CPUPerc}} mem={{.MemUsage}}' asterisk cc-backend cc-postgres cc-redis 2>/dev/null
+  fi
+}
 while true; do
-  echo "$(date +%s) $(docker stats --no-stream --format \
-    '{{.Name}} cpu={{.CPUPerc}} mem={{.MemUsage}}' asterisk cc-backend cc-postgres cc-redis 2>/dev/null | tr '\n' ' ')"
+  echo "$(date +%s) $(stats_line | tr '\n' ' ')"
   sleep 5
-done > "$OUT/$LABEL.stats") &
+done > "$OUT/$LABEL.stats" &
 STATS_PID=$!
 
 SCEN=$(mktemp /tmp/uac-XXXX.xml)
