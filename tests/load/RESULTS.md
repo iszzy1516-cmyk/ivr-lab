@@ -50,7 +50,17 @@ production server (below).
 |-----|---------------|----------|---------|
 | server-ivr-500 (pre-fix) | 1206 ok / 1294 failed | — | — |
 | server-ivr-500 (ulimit fix) | **2500/2500 ok, 0 failed** | avg 115% / peak 143% CPU, 0.18 GiB | avg 50% / peak 64% CPU, 0.06 GiB |
-| server-queue-500 | (below) | | |
+| server-queue-500 | wedge: 500 calls stuck `Ring` in Stasis | see below | — |
+| server-queue-100 | same wedge reproduced at 100 concurrent | see below | — |
+
+Reproduced at only 100 concurrent queued calls: all channels pile into
+`Ring`+Stasis while the ARI REST server throws connection errors for every
+request during the burst, then recovers. It is not a hardware limit — CPU sat
+at ~115% during the clean ivr-500 run, and ARI responds in <20 ms once the
+burst passes. The trigger is per-call **mixing-bridge + MOH churn**: bridge
+create/add/MOH-start per caller, then teardown floods the Stasis/ARI event
+machinery (which shares infra with the ARI HTTP server) and the control plane
+stalls exactly when new calls need `answer()`.
 
 The pre-fix failure mode was deterministic: **488 Not Acceptable Here** on new
 INVITEs once ~1.2k calls had passed. Asterisk's logs showed
@@ -76,6 +86,29 @@ Operational lessons from Environment B:
 4. sipp timing: with `-l 500` and 60 s holds, effective rate is ~8 calls/s —
    size `-m` accordingly and don't kill the wrapper mid-run; orphaned SIP
    channels need mass hangup via ARI.
+
+## The 500-concurrent queue ceiling (important)
+
+`server-queue-500` does **not** complete cleanly on a single node: partway
+through, Asterisk's built-in ARI HTTP server saturates — REST connections start
+dropping in bursts (`transport error` on every call), new INVITEs get their 180
+but the backend's `answer()` never lands, and 500 channels pile up in
+`Ring`+Stasis. The IVR path (no bridges, no MOH) sustains 500 concurrent
+indefinitely; the queue path (one mixing bridge + one MOH stream **per waiting
+call**) is what breaks the control plane.
+
+This matches how real Asterisk deployments behave: `app_queue` doesn't create
+per-call bridges/MOH — it parks all waiting callers in one holding context with
+a shared MOH stream.
+
+**Phase 2 fix (recommended):** one holding bridge per queue with bridge-level
+MOH (a single shared stream). On answer, move the caller from the holding
+bridge into a fresh 2-party bridge with the agent. This collapses 500 bridges +
+500 MOH decoders → 1 + 1, and removes the burst load on the ARI server at
+exactly the moment agents start answering.
+
+Interim mitigation if 500 queued calls are needed before then: drop per-bridge
+MOH (`moh_start` in `enqueue`) and/or ramp arrivals slower than ~5/s.
 
 ## Takeaways
 
