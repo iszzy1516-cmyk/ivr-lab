@@ -1,0 +1,120 @@
+name: ivr-lab
+
+services:
+  asterisk:
+    build: ./asterisk
+    image: ivr-lab-asterisk:20
+    container_name: asterisk
+    restart: always
+    stop_grace_period: 30s
+    # Host networking: SIP/RTP bind the host directly (no 10k port forwards for
+    # rootlessport to manage, no NAT weirdness in SDP). The backend reaches ARI
+    # via host.containers.internal. ARI :8088 is therefore LAN-exposed — fine
+    # for the lab, tighten before any real deployment.
+    network_mode: host
+    environment:
+      SIP_EXTERNAL_IP: ${SIP_EXTERNAL_IP:-192.168.1.182}
+    volumes:
+      - ./asterisk/config:/etc/asterisk:ro
+    healthcheck:
+      test: ["CMD-SHELL", "asterisk -rx 'core show version' >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: cc-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: contactcenter
+      POSTGRES_PASSWORD: contactcenter
+      POSTGRES_DB: contactcenter
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U contactcenter -d contactcenter"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [cc]
+
+  redis:
+    image: redis:7-alpine
+    container_name: cc-redis
+    restart: always
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [cc]
+
+  backend:
+    build: ./backend
+    image: ivr-lab-backend:1
+    container_name: cc-backend
+    restart: always
+    environment:
+      DATABASE_URL: postgresql://contactcenter:contactcenter@postgres:5432/contactcenter
+      REDIS_URL: redis://redis:6379/0
+      ARI_BASE: http://ariuser:aripass@host.docker.internal:8088/ari
+      ARI_APP: ivr
+      # Built from bundled Asterisk core sounds:
+      IVR_PROMPT: ${IVR_PROMPT:-sound:basic-pbx-ivr-main,sound:silence/1}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      asterisk:
+        condition: service_healthy
+    networks: [cc]
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: cc-prometheus
+    restart: always
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=15d"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - promdata:/prometheus
+    ports:
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
+    networks: [cc]
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: cc-grafana
+    restart: always
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafanadata:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on: [prometheus]
+    networks: [cc]
+
+volumes:
+  pgdata:
+  redisdata:
+  promdata:
+  grafanadata:
+
+networks:
+  cc:
+    name: cc-net

@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>IVR Lab Contact Center</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem; background: #f4f5f7; color: #222; }
+  h1 { font-size: 1.4rem; }
+  h2 { font-size: 1.05rem; margin-top: 1.5rem; }
+  section { background: #fff; border: 1px solid #ddd; border-radius: 8px;
+            padding: 1rem 1.25rem; margin-bottom: 1rem; }
+  table { border-collapse: collapse; width: 100%; font-size: .9rem; }
+  td, th { border-bottom: 1px solid #eee; padding: .35rem .5rem; text-align: left; }
+  button { padding: .3rem .8rem; border: 1px solid #888; border-radius: 4px;
+           background: #fff; cursor: pointer; }
+  button.on { background: #2e7d32; color: #fff; border-color: #2e7d32; }
+  button.ans { background: #1565c0; color: #fff; border-color: #1565c0; }
+  select, input { padding: .3rem; margin-right: .4rem; }
+  #log { font-family: monospace; font-size: .78rem; background: #1d1f21; color: #c5c8c6;
+         padding: .75rem; height: 180px; overflow-y: auto; border-radius: 6px; white-space: pre-wrap; }
+  .muted { color: #777; font-size: .8rem; }
+</style>
+</head>
+<body>
+<h1>☎ IVR Lab Contact Center — Agent Dashboard</h1>
+
+<section>
+  <h2>Me</h2>
+  <div id="me-bar">
+    <select id="agent-sel"><option value="">loading agents…</option></select>
+    <button onclick="setStatus('available')">Go Available</button>
+    <button onclick="setStatus('offline')">Go Offline</button>
+    <span id="me-state" class="muted"></span>
+  </div>
+  <div style="margin-top:.5rem">
+    <input id="new-name" placeholder="Name" size="10">
+    <input id="new-ext" placeholder="Ext (e.g. 6003)" size="10">
+    <button onclick="createAgent()">Register agent</button>
+    <span class="muted">(also edit the softphone creds in asterisk/config/pjsip.conf)</span>
+  </div>
+</section>
+
+<section>
+  <h2>Queues — dial 9000 from a softphone, press 1 = sales, 2 = support</h2>
+  <table id="queues">
+    <tr><th>Queue</th><th>Caller</th><th>Status</th><th>Waited (s)</th><th></th></tr>
+  </table>
+</section>
+
+<section>
+  <h2>Call history</h2>
+  <table id="history">
+    <tr><th>Caller</th><th>Queue</th><th>Outcome</th><th>Wait</th><th>Handle</th><th>Ended</th></tr>
+  </table>
+</section>
+
+<section>
+  <h2>Events</h2>
+  <div id="log"></div>
+</section>
+
+<script>
+const $ = id => document.getElementById(id);
+const ws = new WebSocket(`ws://${location.host}/events`);
+
+function log(msg) {
+  const el = $("log");
+  el.textContent += new Date().toLocaleTimeString() + "  " + msg + "\n";
+  el.scrollTop = el.scrollHeight;
+}
+ws.onmessage = e => { const m = JSON.parse(e.data); log(JSON.stringify(m)); refresh(); };
+ws.onclose = () => log("WEBSOCKET CLOSED — reloading in 3s") || setTimeout(() => location.reload(), 3000);
+
+async function api(path, opts) {
+  const r = await fetch(path, opts && { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(opts.body) });
+  if (!r.ok) { const t = await r.text(); throw new Error(r.status + " " + t); }
+  return r.json();
+}
+
+async function refreshAgents() {
+  const agents = await api("/agents");
+  const sel = $("agent-sel");
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">— pick agent —</option>';
+  for (const a of agents) {
+    const o = document.createElement("option");
+    o.value = a.id; o.textContent = `#${a.id} ${a.name} (${a.extension}) [${a.state}]`;
+    sel.appendChild(o);
+  }
+  sel.value = cur;
+}
+
+async function refreshQueue() {
+  const q = await api("/queue");
+  const t = $("queues");
+  t.innerHTML = "<tr><th>Queue</th><th>Caller</th><th>Status</th><th>Waited (s)</th><th></th></tr>";
+  for (const [name, calls] of Object.entries(q)) {
+    if (!calls.length) {
+      t.innerHTML += `<tr><td>${name}</td><td colspan="4" class="muted">empty</td></tr>`;
+    }
+    for (const c of calls) {
+      t.innerHTML += `<tr><td>${name}</td><td>${c.caller}</td><td>${c.status}</td><td>${c.waited}</td>` +
+        `<td><button class="ans" onclick="answer('${name}','${c.key}')">Answer</button></td></tr>`;
+    }
+  }
+}
+
+async function refreshHistory() {
+  const rows = await api("/calls?limit=15");
+  const t = $("history");
+  t.innerHTML = "<tr><th>Caller</th><th>Queue</th><th>Outcome</th><th>Wait</th><th>Handle</th><th>Ended</th></tr>";
+  for (const c of rows) {
+    t.innerHTML += `<tr><td>${c.caller_id ?? ""}</td><td>${c.queue ?? ""}</td><td>${c.outcome ?? c.status}</td>` +
+      `<td>${c.wait_seconds ?? ""}</td><td>${c.handle_seconds ?? ""}</td><td>${(c.ended_at ?? "").slice(11, 19)}</td></tr>`;
+  }
+}
+
+async function refresh() { await refreshAgents(); await refreshQueue(); await refreshHistory();
+  const sel = $("agent-sel"); if (sel.value) $("me-state").textContent = sel.options[sel.selectedIndex].text; }
+
+async function setStatus(state) {
+  const id = $("agent-sel").value;
+  if (!id) return alert("pick an agent first");
+  try { await api(`/agents/${id}/status`, { body: { state } }); refresh(); } catch (e) { alert(e); }
+}
+
+async function createAgent() {
+  try { await api("/agents", { body: { name: $("new-name").value, extension: $("new-ext").value } }); refresh(); }
+  catch (e) { alert(e); }
+}
+
+async function answer(queue, key) {
+  const id = $("agent-sel").value;
+  if (!id) return alert("pick an agent first — then answer on your softphone when it rings");
+  try { await api(`/queue/${queue}/${key}/answer`, { body: { agent_id: +id } }); log("ringing your softphone…"); }
+  catch (e) { alert(e); }
+  refresh();
+}
+
+refresh(); setInterval(refreshQueue, 3000);
+</script>
+</body>
+</html>

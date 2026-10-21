@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend-tests:
+    name: Backend API tests (real Postgres + Redis)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: contactcenter
+          POSTGRES_PASSWORD: contactcenter
+          POSTGRES_DB: contactcenter
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U contactcenter -d contactcenter"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r backend/requirements-dev.txt
+
+      - name: Run tests
+        working-directory: backend
+        run: python -m pytest tests -v
+        env:
+          DATABASE_URL: postgresql://contactcenter:contactcenter@localhost:5432/contactcenter
+          REDIS_URL: redis://localhost:6379/0
+          # No Asterisk in CI: the ARI reconnect loop retries harmlessly in
+          # the background while the API is exercised.
+          ARI_BASE: http://ariuser:aripass@localhost:8088/ari
+
+  asterisk-config:
+    name: Asterisk config boot check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Boot Asterisk with the repo configs
+        run: |
+          # Writable mount: the entrypoint normally substitutes __EXTERNAL_IP__.
+          docker run --rm \
+            -v "$PWD/asterisk/config:/etc/asterisk" \
+            andrius/asterisk:20 \
+            sh -c 'sed -i "s/__EXTERNAL_IP__/127.0.0.1/g" /etc/asterisk/pjsip.conf; timeout 25 asterisk -U asterisk -f -v' \
+            > boot.log 2>&1 || true
+
+      - name: Verify clean boot
+        run: |
+          grep -q "Asterisk Ready" boot.log
+          echo "=== boot log tail ==="
+          tail -5 boot.log
+          if grep -iE "error|failed to (load|open)" boot.log; then
+            echo "Config errors found in boot log" && exit 1
+          fi
+
+  compose-check:
+    name: Docker Compose file validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate compose file
+        run: docker compose config -q && echo "compose file OK"

@@ -1,0 +1,55 @@
+{
+  "title": "Contact Center MVP",
+  "uid": "cc-mvp",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "timezone": "browser",
+  "time": { "from": "now-6h", "to": "now" },
+  "annotations": { "list": [] },
+  "templating": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Calls finalized per minute (queue / outcome)",
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (queue, outcome) (rate(cc_calls_total[5m])) * 60",
+          "legendFormat": "{{queue}} / {{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Avg wait seconds (5m window, by queue)",
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (queue) (rate(cc_wait_seconds_sum[5m])) / sum by (queue) (rate(cc_wait_seconds_count[5m]))",
+          "legendFormat": "{{queue}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Avg handle seconds (5m window, by queue)",
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (queue) (rate(cc_handle_seconds_sum[5m])) / sum by (queue) (rate(cc_handle_seconds_count[5m]))",
+          "legendFormat": "{{queue}}"
+        }
+      ]
+    }
+  ]
+}
