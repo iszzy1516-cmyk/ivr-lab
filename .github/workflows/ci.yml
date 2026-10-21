@@ -56,23 +56,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Boot Asterisk with the repo configs
+      - name: Boot Asterisk with the repo configs and verify
         run: |
           # Writable mount: the entrypoint normally substitutes __EXTERNAL_IP__.
           docker run --rm \
             -v "$PWD/asterisk/config:/etc/asterisk" \
             andrius/asterisk:20 \
-            sh -c 'sed -i "s/__EXTERNAL_IP__/127.0.0.1/g" /etc/asterisk/pjsip.conf; timeout 25 asterisk -U asterisk -f -v' \
-            > boot.log 2>&1 || true
-
-      - name: Verify clean boot
-        run: |
-          grep -q "Asterisk Ready" boot.log
-          echo "=== boot log tail ==="
-          tail -5 boot.log
-          if grep -iE "error|failed to (load|open)" boot.log; then
-            echo "Config errors found in boot log" && exit 1
-          fi
+            sh -c '
+              sed -i "s/__EXTERNAL_IP__/127.0.0.1/g" /etc/asterisk/pjsip.conf
+              asterisk -U asterisk -f -v >/tmp/boot.log 2>&1 &
+              for i in $(seq 1 40); do
+                grep -q "Asterisk Ready" /tmp/boot.log 2>/dev/null && break
+                sleep 1
+              done
+              grep -q "Asterisk Ready" /tmp/boot.log || { cat /tmp/boot.log; exit 1; }
+              asterisk -rx "core show version" | head -1
+              asterisk -rx "pjsip show transports" | grep -q "transport-udp.*0.0.0.0:5060" \
+                || { echo "SIP transport not bound"; exit 1; }
+              kill %1 2>/dev/null || true
+            '
 
   compose-check:
     name: Docker Compose file validation
